@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import (confusion_matrix,
                              ConfusionMatrixDisplay)
+from config import Config
 
 
 # ------------------------------
@@ -64,123 +65,39 @@ def normalize_by_rest_state(df: pd.DataFrame,
 
 
 class LabelClassifier:
-    def __init__(self, mode='basic', low_start=1, mid_start=5, high_start=8):
+    def __init__(self, 
+                 cfg: Config):
         """
-        :param mode: 分类模式，可选 'basic' 或 'tanh'
         :param low_start: basic 模式下低负荷的起始分数
         :param mid_start: basic 模式下中负荷的起始分数
         :param high_start: basic 模式下高负荷的起始分数
         """
-        self.mode = mode
-        self.low_start = low_start
-        self.mid_start = mid_start
-        self.high_start = high_start
-
-        self._mu = None
-        self._sigma = None
-        self._scale = None
-        self._all_labels = None
-        self._q1 = None
-        self._q2 = None
-        self._fitted = False
-
-    def set_all_labels(self, all_labels):
-        """
-        设置全部标签，用于 tanh 标准化。
-        :param all_labels: 一维 array 或 Series
-        """
-        if self.mode == 'basic':
-            return
-        self._all_labels = all_labels
-        self._fit_tanh()
-        self._fitted = False
-
-    def _fit_tanh(self):
-        """
-        用于 tanh 分类的标准化统计
-        """
-        if self._all_labels is None:
-            raise ValueError("Tanh mode requires setting all_labels first via set_all_labels().")
-
-        self._mu = np.mean(self._all_labels)
-        self._sigma = np.std(self._all_labels)
-        if self._sigma > 0:
-            self._scale = 0.1 / self._sigma
-        else:
-            self._scale = 0.01
-        x_norm_all = np.tanh(self._scale * (self._all_labels - self._mu))
-        # 计算33.3%和66.6%分位点作为阈值
-        self._q1 = np.percentile(x_norm_all, 33.3)
-        self._q2 = np.percentile(x_norm_all, 66.6)
-        self._fitted = True
-
-    def _classify_basic(self, x):
-        if self.low_start <= x <= (self.mid_start - 1):
-            return 0
-        elif self.mid_start <= x <= (self.high_start - 1):
-            return 1
-        else:
-            return 2
-
-    def _classify_tanh(self, x):
-        if not self._fitted:
-            self._fit_tanh()
-        x_norm = np.tanh(self._scale * (x - self._mu) / self._sigma)
-        if x_norm < self._q1:
-            return 0
-        elif x_norm < self._q2:
-            return 1
-        else:
-            return 2
-
-    def classify(self, x):
+        self.num_classes = cfg.num_classes
+        self.low_start = cfg.low_level
+        self.mid_start = cfg.mid_level
+        self.high_start = cfg.high_level
+        self.binary_threshold = cfg.binary_threshold
+        
+    def classify(self, rating):
         """
         将单个标签值分类为 0/1/2。
         :param x: 单个 MWL_Rating 值
         :return: 类别标签 0/1/2
         """
-        if self.mode == 'basic':
-            return self._classify_basic(x)
-        elif self.mode == 'tanh':
-            return self._classify_tanh(x)
-        else:
-            raise ValueError(f"Unsupported mode: {self.mode}")
+        if self.num_classes == 3:
+            if rating < self.mid_start:
+                return 0
+            elif self.mid_start <= rating < self.high_start:
+                return 1
+            else:
+                return 2
+        elif self.num_classes == 2:
+            if rating <= self.binary_threshold:
+                return 0
+            else:
+                return 1
 
-
-# def load_eeg_data(subjects, base_path, low_start, mid_start, high_start):
-#     """
-#     加载多个被试的 EEG 数据，并统一处理标签和添加被试编号列。
-#
-#     :param subjects: 被试编号列表
-#     :param base_path: 基础文件路径，包含所有被试的子文件夹
-#     :param low_start: 低类别最低分数
-#     :param mid_start: 中类别最低分数
-#     :param high_start: 高类别最低分数
-#     :return: 合并后的 DataFrame
-#     """
-#     all_data = []
-#     for subject in subjects:
-#         file_path = f'{base_path}/{subject}/20width-4step/combined_eeg_features.csv'
-#         df = pd.read_csv(file_path)
-#
-#         normalized_df = normalize_by_rest_state(df, rest_duration_minutes=5, sampling_rate=256)
-#         # 添加类
-#         classifier = LabelClassifier(mode='tanh')
-#         classifier.set_all_labels(df['MWL_Rating'])
-#         classifier._fit_tanh()
-#         # 统一标签处理
-#         normalized_df['MWL_Rating'] = normalized_df['MWL_Rating'].apply(
-#             lambda x: 0 if low_start <= x <= (mid_start - 1)
-#             else (1 if mid_start <= x <= (high_start - 1)
-#                   else 2))
-#         # 添加被试编号列
-#         normalized_df['subject_id'] = subject
-#
-#         all_data.append(normalized_df)
-#     # 合并所有数据并返回
-#     return pd.concat(all_data, ignore_index=True)
-
-def load_eeg_data(subjects, base_path, low_start, mid_start, high_start, mode='basic'):
+def load_eeg_data(cfg: Config):
     """
     加载多个被试的 EEG 数据，并统一处理标签和添加被试编号列。
 
@@ -192,23 +109,18 @@ def load_eeg_data(subjects, base_path, low_start, mid_start, high_start, mode='b
     :return: 合并后的 DataFrame
     """
     all_data = []
-    for subject in subjects:
-        file_path = f'{base_path}/{subject}/20width-4step/combined_eeg_features.csv'
+    for subject in cfg.subjects:
+        file_path = f'{cfg.data_path}/{subject}/20width-4step/combined_eeg_features.csv'
         df = pd.read_csv(file_path)
         # 特征归一化
-        # df_individual_zscore = per_feature_individual_zscore(df)
-        normalized_df = normalize_by_rest_state(df, rest_duration_minutes=5, sampling_rate=256)
+        normalized_df = normalize_by_rest_state(df, 
+                                                rest_duration_minutes=5, 
+                                                sampling_rate=256)
         # 标签分界类
-        classifier = LabelClassifier(mode=mode,
-                                     low_start=low_start,
-                                     mid_start=mid_start,
-                                     high_start=high_start)
-        if mode == 'tanh':
-            classifier.set_all_labels(normalized_df['MWL_Rating'])
+        classifier = LabelClassifier(cfg)
         # 统一标签处理
-        normalized_df['MWL_Rating'] = normalized_df['MWL_Rating'].apply(
-            classifier.classify
-        )
+        normalized_df['MWL_Rating'] = \
+            normalized_df['MWL_Rating'].apply(classifier.classify)
         # 添加被试编号列
         normalized_df['subject_id'] = subject
 
@@ -289,3 +201,8 @@ def plot_confusion_matrix(y_true, y_pred, subject_id, save_path=None, cmap=plt.c
         print(f"Saved confusion matrix to {save_path}")
     if show:
         plt.show()
+
+
+# class PairedData(object):
+#     def __init__(self, dataloader1, dataloader2, max_datasets_size=float("inf")):
+      
