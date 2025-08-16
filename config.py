@@ -36,8 +36,7 @@ class Config:
   step1_iter: int = 1
   step2_iter: int = 4
   step3_iter: int = 1
-  # step4_iter: int = 1
-  lambda_GRL: float = 0.3
+  lambda_GRL: float = 0.7
 
   # mwl level
   low_level = 1
@@ -45,7 +44,7 @@ class Config:
   high_level = 9
 
   # 任务定义
-  num_classes: int = 3
+  num_classes: int = 2
   binary_threshold: int = 6
 
   # misc

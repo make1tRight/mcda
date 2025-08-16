@@ -15,6 +15,7 @@ from physiological_measures import *
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 # from reverse_validation import ReverseValidator
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
 def empty_line():
@@ -94,9 +95,6 @@ def run_training(data, cfg: Config, logger: Logger):
         x_test = scaler.transform(x_test)
 
         # 训练
-        # source_x = torch.tensor(x_train, dtype=torch.float32).unsqueeze(2).to(cfg.device)
-        # source_y = torch.tensor(y_train, dtype=torch.long).to(cfg.device)
-        # target_x = torch.tensor(x_test, dtype=torch.float32).unsqueeze(2).to(cfg.device)
         source_x = torch.tensor(x_train, dtype=torch.float32).to(cfg.device)
         source_y = torch.tensor(y_train, dtype=torch.long).to(cfg.device)
         target_x = torch.tensor(x_test, dtype=torch.float32).to(cfg.device)
@@ -126,14 +124,13 @@ def run_training(data, cfg: Config, logger: Logger):
         optimizer_d = optim.Adam(model_d.parameters(), 
                                  lr=cfg.lr_domain_discriminator,
                                  weight_decay=1e-4)
-
         source_dataset = TensorDataset(source_x, source_y)
         source_loader = DataLoader(source_dataset, batch_size=64, shuffle=True)
         target_dataset = TensorDataset(target_x, target_y)
         target_loader = DataLoader(target_dataset, batch_size=64, shuffle=True)
 
         loss_manager = LossManager()
-        mcd_train(
+        best_state = mcd_train(
             source_loader,
             target_loader,
             model_e,
@@ -146,14 +143,14 @@ def run_training(data, cfg: Config, logger: Logger):
             optimizer_d,
             cfg,
             logger,
-            loss_manager,
-            use_domain=True)
-        # FeaturesExtractor可以设置step1_iter=500
-        # TransformerExtractor设置step1_iter=300就差不多了
-        # 测试
+            loss_manager)
+        model_e.load_state_dict(best_state["model_e"])
+        model_c1.load_state_dict(best_state["model_c1"])
+        model_c2.load_state_dict(best_state["model_c2"])
         model_e.eval()
         model_c1.eval()
         model_c2.eval()
+        
 
         with torch.no_grad():
             features = model_e(target_x)
@@ -172,7 +169,8 @@ def run_training(data, cfg: Config, logger: Logger):
             str(target_subject),
             os.path.join(cfg.log_path, f"{target_subject}"))
         # 指标计算
-        accuracy = balanced_accuracy_score(y_test, y_pred)
+        # accuracy = balanced_accuracy_score(y_test, y_pred)
+        accuracy = accuracy_score(y_test, y_pred)
         precision = precision_score(y_test, y_pred, 
                                     average="weighted", 
                                     zero_division=0)
@@ -233,8 +231,6 @@ def run_training(data, cfg: Config, logger: Logger):
 def main():
     try:
         cfg = Config()
-        # 1, 5, 8
-        # 1, 6, 9
         # 生理数据读取
         full_df = load_eeg_data(cfg)
         logger = Logger(cfg.log_path)
