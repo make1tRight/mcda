@@ -7,7 +7,9 @@ import os
 class Config:
   # path
   data_path: str = r"D:\Data\Group\2-nuclear_data\deeplearning"
+  
   log_path: str = os.path.join(data_path, "logs")
+  
   subjects: List[str] = field(default_factory=lambda: [
     'NP03', 'NP04', 'NP05', 
     'NP06', 'NP07', 'NP08', 
@@ -19,7 +21,14 @@ class Config:
     'NP24', 'NP25', 'NP26',
     'NP27', 'NP28', 'NP29', 
     'NP30', 'NP31', 'NP32'])
-  
+
+  modal_types: List[str] = field(default_factory=lambda: [
+    'eeg', 
+    'ecg', 
+    'eda', 
+    'eye'
+  ])
+
   # data
   knn_k: int = 5
   smote_seed: int = 42
@@ -44,8 +53,11 @@ class Config:
   high_level = 9
 
   # 任务定义
-  num_classes: int = 2
+  num_classes: int = 3
   binary_threshold: int = 6
+
+  # 作为测试集的阈值
+  threshold_2b_test: int = 2
 
   # misc
   device: str = "cuda" if torch.cuda.is_available() else "cpu"

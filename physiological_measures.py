@@ -9,6 +9,9 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import (confusion_matrix,
                              ConfusionMatrixDisplay)
 from config import Config
+from logger import Logger
+from typing import Optional, Dict, List
+
 
 
 # ------------------------------
@@ -64,19 +67,54 @@ def normalize_by_rest_state(df: pd.DataFrame,
     return normalized_df
 
 
+# class LabelClassifier:
+#     def __init__(self, 
+#                  cfg: Config):
+#         """
+#         :param low_start: basic 模式下低负荷的起始分数
+#         :param mid_start: basic 模式下中负荷的起始分数
+#         :param high_start: basic 模式下高负荷的起始分数
+#         """
+#         self.num_classes = cfg.num_classes
+#         self.low_start = cfg.low_level
+#         self.mid_start = cfg.mid_level
+#         self.high_start = cfg.high_level
+#         self.binary_threshold = cfg.binary_threshold
+        
+#     def classify(self, rating):
+#         """
+#         将单个标签值分类为 0/1/2。
+#         :param x: 单个 MWL_Rating 值
+#         :return: 类别标签 0/1/2
+#         """
+#         if self.num_classes == 3:
+#             if rating < self.mid_start:
+#                 return 0
+#             elif self.mid_start <= rating < self.high_start:
+#                 return 1
+#             else:
+#                 return 2
+#         elif self.num_classes == 2:
+#             if rating <= self.binary_threshold:
+#                 return 0
+#             else:
+#                 return 1
+
 class LabelClassifier:
     def __init__(self, 
-                 cfg: Config):
+                 low: int,
+                 mid: int,
+                 high: int,
+                 binary_threshold: int,
+                 num_classes: int):
         """
-        :param low_start: basic 模式下低负荷的起始分数
-        :param mid_start: basic 模式下中负荷的起始分数
-        :param high_start: basic 模式下高负荷的起始分数
+        
         """
-        self.num_classes = cfg.num_classes
-        self.low_start = cfg.low_level
-        self.mid_start = cfg.mid_level
-        self.high_start = cfg.high_level
-        self.binary_threshold = cfg.binary_threshold
+        self.num_classes = num_classes
+        self.low_start = low
+        self.mid_start = mid
+        self.high_start = high
+        self.binary_threshold = binary_threshold
         
     def classify(self, rating):
         """
@@ -202,7 +240,131 @@ def plot_confusion_matrix(y_true, y_pred, subject_id, save_path=None, cmap=plt.c
     if show:
         plt.show()
 
+class MultimodalLoader:
+  def __init__(self, cfg: Config, logger: Logger, lbl_classifier: LabelClassifier):
+    self.cfg = cfg
+    self.logger = logger
+    self.lbl_classifier = lbl_classifier
 
-# class PairedData(object):
-#     def __init__(self, dataloader1, dataloader2, max_datasets_size=float("inf")):
+  def LoadMultimodalData(self) -> pd.DataFrame:
+    """
+    加载多模态数据，处理缺失模态
+    """
+    all_data = []
+    for subject in self.cfg.subjects:
+      data = self._loadSubjectData(subject)
+      if data is not None:
+        all_data.append(data)
+    
+    if not all_data:
+        raise ValueError("cannot load any subject data")
+    return pd.concat(all_data, ignore_index=True)
+
+  def _loadSubjectData(self, subject: str) -> Optional[pd.DataFrame]:
+    """
+    加载单个被试的数据
+    """
+    subject_data: Dict[str, pd.DataFrame] = {}
+    available_modal_types: List[str] = []
+
+    for modal_type in self.cfg.modal_types:
+      file_path = f'{self.cfg.data_path}/{subject}/20width-4step/combined_{modal_type}_features.csv'
+      try:
+        data = pd.read_csv(file_path, na_values=['--', '-', 'NA', 'NaN', 'nan', ''])
+        data.replace(['--', '-', 'NA', 'NaN', 'nan', ''], np.nan, inplace=True)
+        if 'relative_time' not in data.columns or 'MWL_Rating' not in data.columns:
+          self.logger.log("No relative_time or MWL_Rating column in [subject: {}] data", 
+                          subject, level="WARNING")
+          continue
+        subject_data[modal_type] = data
+        available_modal_types.append(modal_type)
+      except FileNotFoundError:
+        self.logger.log("Missing file for subject: {} modal type: {}", subject, modal_type)
+        continue
+    
+    if not available_modal_types:
+      self.logger.log("No available modal type for subject: {}", subject)
+      return None
+    
+    combined_data = self._combineModalities(subject_data, available_modal_types, subject)
+    self.logger.log("Merged subject {}: all features shape={}", subject, combined_data.shape, level="INFO")
+    return combined_data
+
+  def _combineModalities(self, subject_data: Dict, avail_model_type: List[str], subject: str) -> pd.DataFrame:
+    """
+    合并多模态数据
+    """
+    # [收集时间戳]
+    tol = 3.0
+    all_timestamp = sorted({t for df in subject_data.values() for t in df['relative_time'].dropna()})
+    base_times = []
+    if all_timestamp:
+      rep = all_timestamp[0]
+      base_times.append(rep)
+      for t in all_timestamp[1:]:
+        if t - rep > tol:
+          rep = t
+          base_times.append(rep)
+    total_features = pd.DataFrame({'relative_time': base_times})
+
+    if not all_timestamp:
+      raise ValueError("No timestamp found in [subject: {}] data", subject)
+    
+    # [合并特征]
+    features = []
+    for modal_type in self.cfg.modal_types:
+      if modal_type in avail_model_type:
+        df = subject_data[modal_type]
+        feature_cols = [col for col in df.columns if col not in ['relative_time', 'MWL_Rating']]
+        if len(feature_cols) == 0:
+          continue
+        block = df[['relative_time'] + feature_cols].copy()
+        block = block.rename(columns={col: f"{modal_type}_{col}" for col in feature_cols})
+        features.append(block)
+    for block in features:
+      # total_features = total_features.merge(block, on='relative_time', how='left')
+      total_features = pd.merge_asof(total_features,
+                                     block, 
+                                     on='relative_time', 
+                                     direction='backward', 
+                                     tolerance=tol)
+    
+
+    # [合并标签数据]
+    labels = []
+    for modal_type in self.cfg.modal_types:
+      if modal_type in avail_model_type and \
+        modal_type in subject_data and \
+        'MWL_Rating' in subject_data[modal_type].columns:
+          labels.append(
+            subject_data[modal_type][['relative_time', 'MWL_Rating']]
+            .rename(columns={'MWL_Rating': f'MWL_Rating__{modal_type}'}))
       
+    if labels:
+      lbl = labels[0]
+      for extra in labels[1:]:
+        lbl = lbl.merge(extra, on='relative_time', how='outer')
+      label_cols = [c for c in lbl.columns if c.startswith('MWL_Rating__')]
+      lbl['MWL_Rating'] = lbl[label_cols].bfill(axis=1).ffill(axis=1).iloc[:, 0]
+      lbl = lbl[['relative_time', 'MWL_Rating']]
+      total_features = total_features.merge(lbl, on='relative_time', how='left')
+      total_features['MWL_Rating'] = total_features['MWL_Rating'].ffill().bfill()
+    else:
+      total_features['MWL_Rating'] = np.nan
+
+    features_only = [c for c in total_features.columns if c not in ['relative_time', 'MWL_Rating']]
+    total_features[features_only] = total_features[features_only].fillna(0)
+    # [三分类]
+    # classifier = LabelClassifier(self.cfg.low_level, 
+    #                              self.cfg.mid_level, 
+    #                              self.cfg.high_level, 
+    #                              self.cfg.binary_threshold, 
+    #                              self.cfg.num_classes)
+    total_features['MWL_Rating'] = total_features['MWL_Rating'].apply(self.lbl_classifier.classify)
+
+    total_features['subject_id'] = subject
+    total_features = total_features.sort_values(by='relative_time').reset_index(drop=True)
+    total_features = total_features.drop_duplicates(subset=features_only, keep='first')
+    self.logger.log("Success to combine modalities for subject: {}, shape: {}", 
+                    subject, total_features.shape, level="INFO")
+    return total_features

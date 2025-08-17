@@ -60,7 +60,7 @@ def run_training(data, cfg: Config, logger: Logger):
         # x_test = x_test[test_clean_mask]
         # y_test = y_test[test_clean_mask]
         label_counter_test = Counter(y_test)
-        if len(label_counter_test) < cfg.num_classes:
+        if len(label_counter_test) < cfg.threshold_2b_test:
             logger.log("Skipping subject: {} due to insufficient classes in target domain: ", 
                        target_subject)
             logger.log("Found {}, expected {}.", 
@@ -232,25 +232,22 @@ def main():
     try:
         cfg = Config()
         # 生理数据读取
-        full_df = load_eeg_data(cfg)
+        # full_df = load_eeg_data(cfg)
         logger = Logger(cfg.log_path)
+        lbl_classifier = LabelClassifier(cfg.low_level, 
+                                         cfg.mid_level, 
+                                         cfg.high_level, 
+                                         cfg.binary_threshold,
+                                         cfg.num_classes)
+        mm_loader = MultimodalLoader(cfg, logger, lbl_classifier)
+        full_df = mm_loader.LoadMultimodalData()
         performance_list = []
-        logger.log("info: {}", 
-                   full_df.shape, 
-                   level="INFO")
+        logger.log("info: {}", full_df.shape, level="INFO")
 
-        performance = run_training(full_df, 
-                                   cfg, 
-                                   logger)
+        performance = run_training(full_df, cfg, logger)
         performance_list.append(performance)
-        metrics = [
-            "accuracy", 
-            "precision", 
-            "recall", 
-            "f1", 
-            "auc"]
-        logger.save_summary(performance_list, 
-                            metrics)
+        metrics = ["accuracy", "precision", "recall", "f1", "auc"]
+        logger.save_summary(performance_list, metrics)
     except KeyboardInterrupt:
         logger.log("Capture ctrl+c, exiting...")
     finally:
