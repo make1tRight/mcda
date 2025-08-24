@@ -66,40 +66,6 @@ def normalize_by_rest_state(df: pd.DataFrame,
 
     return normalized_df
 
-
-# class LabelClassifier:
-#     def __init__(self, 
-#                  cfg: Config):
-#         """
-#         :param low_start: basic 模式下低负荷的起始分数
-#         :param mid_start: basic 模式下中负荷的起始分数
-#         :param high_start: basic 模式下高负荷的起始分数
-#         """
-#         self.num_classes = cfg.num_classes
-#         self.low_start = cfg.low_level
-#         self.mid_start = cfg.mid_level
-#         self.high_start = cfg.high_level
-#         self.binary_threshold = cfg.binary_threshold
-        
-#     def classify(self, rating):
-#         """
-#         将单个标签值分类为 0/1/2。
-#         :param x: 单个 MWL_Rating 值
-#         :return: 类别标签 0/1/2
-#         """
-#         if self.num_classes == 3:
-#             if rating < self.mid_start:
-#                 return 0
-#             elif self.mid_start <= rating < self.high_start:
-#                 return 1
-#             else:
-#                 return 2
-#         elif self.num_classes == 2:
-#             if rating <= self.binary_threshold:
-#                 return 0
-#             else:
-#                 return 1
-
 class LabelClassifier:
     def __init__(self, 
                  low: int,
@@ -245,6 +211,11 @@ class MultimodalLoader:
     self.cfg = cfg
     self.logger = logger
     self.lbl_classifier = lbl_classifier
+    
+    # 计算期望的总特征维度
+    self.expected_feature_num = sum(m.feature_num for m in self.cfg.modals)
+    self.modal_schema = {m.type: [f"{m.type}_f{i}" for i in range(m.feature_num)]
+                     for m in self.cfg.modals}
 
   def LoadMultimodalData(self) -> pd.DataFrame:
     """
@@ -267,7 +238,8 @@ class MultimodalLoader:
     subject_data: Dict[str, pd.DataFrame] = {}
     available_modal_types: List[str] = []
 
-    for modal_type in self.cfg.modal_types:
+    for modal_config in self.cfg.modals:
+      modal_type = modal_config.type
       file_path = f'{self.cfg.data_path}/{subject}/20width-4step/combined_{modal_type}_features.csv'
       try:
         data = pd.read_csv(file_path, na_values=['--', '-', 'NA', 'NaN', 'nan', ''])
@@ -290,7 +262,44 @@ class MultimodalLoader:
     self.logger.log("Merged subject {}: all features shape={}", subject, combined_data.shape, level="INFO")
     return combined_data
 
-  def _combineModalities(self, subject_data: Dict, avail_model_type: List[str], subject: str) -> pd.DataFrame:
+  def _build_modal_block(self, 
+                         modal_type: str,
+                         df: Optional[pd.DataFrame],
+                         base_times: List[float],
+                         feature_num: int,
+                         default_value: float) -> pd.DataFrame:
+    """
+    构建模态块
+    """
+    cols = self.modal_schema[modal_type]
+    if df is None:
+      return pd.DataFrame({
+        'relative_time': base_times,
+        **{col: default_value for col in cols}})
+    
+    feature_cols = [c for c in df.columns if c not in ['relative_time', 'MWL_Rating']]
+    feature_cols = sorted(feature_cols)
+    k = len(feature_cols)
+
+    if k >= feature_num:
+       use_cols = feature_cols[:feature_num]
+       block = df[['relative_time'] + use_cols].copy()
+       rename_map = {old: new for old, new in zip(use_cols, cols[:feature_num])}
+       block = block.rename(columns=rename_map)
+    else:
+      use_cols = feature_cols
+      block = df[['relative_time'] + use_cols].copy()
+      rename_map = {old: new for old, new in zip(use_cols, cols[:k])}
+      block = block.rename(columns=rename_map)
+      for miss_col in cols[k:]:
+        block[miss_col] = default_value
+        
+    return block[['relative_time'] + cols]
+
+  def _combineModalities(self, 
+                         subject_data: Dict, 
+                         avail_model_type: List[str], 
+                         subject: str) -> pd.DataFrame:
     """
     合并多模态数据
     """
@@ -312,15 +321,22 @@ class MultimodalLoader:
     
     # [合并特征]
     features = []
-    for modal_type in self.cfg.modal_types:
+    for m in self.cfg.modals:
+      modal_type = m.type
       if modal_type in avail_model_type:
-        df = subject_data[modal_type]
-        feature_cols = [col for col in df.columns if col not in ['relative_time', 'MWL_Rating']]
-        if len(feature_cols) == 0:
-          continue
-        block = df[['relative_time'] + feature_cols].copy()
-        block = block.rename(columns={col: f"{modal_type}_{col}" for col in feature_cols})
-        features.append(block)
+        block = self._build_modal_block(modal_type,
+                                        subject_data[modal_type],
+                                        base_times,
+                                        m.feature_num,
+                                        m.default_value)
+      else:
+        block = self._build_modal_block(modal_type,
+                                        None,
+                                        base_times,
+                                        m.feature_num,
+                                        m.default_value)
+      features.append(block)
+
     for block in features:
       # total_features = total_features.merge(block, on='relative_time', how='left')
       total_features = pd.merge_asof(total_features,
@@ -332,7 +348,8 @@ class MultimodalLoader:
 
     # [合并标签数据]
     labels = []
-    for modal_type in self.cfg.modal_types:
+    for modal_config in self.cfg.modals:
+      modal_type = modal_config.type
       if modal_type in avail_model_type and \
         modal_type in subject_data and \
         'MWL_Rating' in subject_data[modal_type].columns:
@@ -352,17 +369,20 @@ class MultimodalLoader:
     else:
       total_features['MWL_Rating'] = np.nan
 
+    # 处理缺失值
     features_only = [c for c in total_features.columns if c not in ['relative_time', 'MWL_Rating']]
+    if len(features_only) != self.expected_feature_num:
+      self.logger.log("Feature dimension mismatch for subject: {}, expected: {}, got: {}",
+                      subject, self.expected_feature_num, len(features_only), level="WARNING")
+      raise ValueError(f"Subject: {subject}: expected: {self.expected_feature_num}, got: {len(features_only)}")
+    
     total_features[features_only] = total_features[features_only].fillna(0)
-    # [三分类]
-    # classifier = LabelClassifier(self.cfg.low_level, 
-    #                              self.cfg.mid_level, 
-    #                              self.cfg.high_level, 
-    #                              self.cfg.binary_threshold, 
-    #                              self.cfg.num_classes)
+
+    # 标签分类
     total_features['MWL_Rating'] = total_features['MWL_Rating'].apply(self.lbl_classifier.classify)
 
-    total_features['subject_id'] = subject
+    # total_features['subject_id'] = subject
+    total_features = total_features.assign(subject_id=subject)
     total_features = total_features.sort_values(by='relative_time').reset_index(drop=True)
     total_features = total_features.drop_duplicates(subset=features_only, keep='first')
     self.logger.log("Success to combine modalities for subject: {}, shape: {}", 

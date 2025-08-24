@@ -1,7 +1,13 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Dict
 import torch
 import os
+
+@dataclass
+class ModalConfig:
+  type: str
+  feature_num: int
+  default_value: float = 0.0
 
 @dataclass
 class Config:
@@ -22,11 +28,11 @@ class Config:
     'NP27', 'NP28', 'NP29', 
     'NP30', 'NP31', 'NP32'])
 
-  modal_types: List[str] = field(default_factory=lambda: [
-    'eeg', 
-    'ecg', 
-    'eda', 
-    'eye'
+  modals: List[ModalConfig] = field(default_factory=lambda: [
+    ModalConfig(type='eeg', feature_num=448),
+    ModalConfig(type='ecg', feature_num=14),
+    ModalConfig(type='eda', feature_num=18),
+    ModalConfig(type='eye', feature_num=12)
   ])
 
   # data
